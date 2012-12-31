@@ -27,13 +27,10 @@ AC_LIBTOOL_WIN32_DLL
 AC_PROG_LIBTOOL
 AC_PROG_CC
 
-AC_PATH_PROG(XSLTPROC, xsltproc, no)
-if test "$XSLTPROC" = "no"; then
-   AC_MSG_ERROR([XCB requires xsltproc.])
-fi
-
+XSLTPROC=no
 HTML_CHECK_RESULT=false
 if test x"$HAVE_CHECK" = xyes; then
+	AC_PATH_PROG(XSLTPROC, xsltproc, no)
 	if test x"$XSLTPROC" != xno; then
 		HTML_CHECK_RESULT=true
 	fi
@@ -294,3 +291,6 @@ echo ""
 echo "  Installation:"
 echo "    Prefix..............: ${prefix}"
 echo ""
+echo "  Unit tests"
+echo "    build...............: ${HAVE_CHECK}"
+echo "    html results........: ${HTML_CHECK_RESULT}"
