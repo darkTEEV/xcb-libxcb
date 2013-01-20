@@ -516,10 +516,11 @@ def get_expr_fields(self):
         else:
             if expr.op == '~':
                 return get_expr_field_names(expr.rhs)
-            elif expr.op == 'popcount':
+            elif expr.op == 'popcount' and expr.rhs:
+                # popcount without rhs is popcount on a list, treat like sumof
                 return get_expr_field_names(expr.rhs)
-            elif expr.op == 'sumof':
-                # sumof expr references another list, 
+            elif expr.op == 'sumof' or expr.op == 'popcount':
+                # sumof/popcount expr references another list,
                 # we need that list's length field here
                 field = None
                 for f in expr.lenfield_parent.fields:
@@ -527,7 +528,7 @@ def get_expr_fields(self):
                         field = f
                         break
                 if field is None:
-                    raise Exception("list field '%s' referenced by sumof not found" % expr.lenfield_name)
+                    raise Exception("list field '%s' referenced by %s not found" % (expr.lenfield_name, expr.op))
                 # referenced list + its length field
                 return [expr.lenfield_name] + get_expr_field_names(field.type.expr)
             elif expr.op == 'enumref':
@@ -793,7 +794,7 @@ def _c_serialize_helper_list_field(context, self, field,
         if len(unresolved)>0:
             raise Exception('could not resolve the length fields required for list %s' % field.c_field_name)
 
-    list_length = _c_accessor_get_expr(expr, field_mapping)
+    list_length = _c_accessor_get_expr(expr, field_mapping, prefix)
 
     # default: list with fixed size elements
     length = '%s * sizeof(%s)' % (list_length, field.type.member.c_wiretype)
@@ -808,6 +809,7 @@ def _c_serialize_helper_list_field(context, self, field,
                 temp_vars.append(int_i)
             if xcb_tmp_len not in temp_vars:
                 temp_vars.append(xcb_tmp_len)
+
             # loop over all list elements and call sizeof repeatedly
             # this should be a bit faster than using the iterators
             code_lines.append("%s    for(i=0; i<%s; i++) {" % (space, list_length))
@@ -1410,13 +1412,13 @@ def _c_accessor_get_length(expr, field_mapping=None):
         # special case: variable and fixed size fields are intermixed
         # if the lenfield is among the fixed size fields, there is no need
         # to call a special accessor function like <expr.lenfield.c_accessor_name + '(' + prefix + ')'>
-        return field_mapping(expr.lenfield_name)
+        return field_mapping[expr.lenfield_name]
     elif expr.lenfield_name is not None:
         return lenfield_name
     else:
         return str(expr.nmemb)
 
-def _c_accessor_get_expr(expr, field_mapping):
+def _c_accessor_get_expr(expr, field_mapping, prefix=None):
     '''
     Figures out what C code is needed to get the length of a list field.
     The field_mapping parameter can be used to change the absolute name of a length field. 
@@ -1428,14 +1430,14 @@ def _c_accessor_get_expr(expr, field_mapping):
 
     if expr.op == '~':
         return '(' + '~' + _c_accessor_get_expr(expr.rhs, field_mapping) + ')'
-    elif expr.op == 'popcount':
+    elif expr.op == 'popcount' and expr.rhs:
         return 'xcb_popcount(' + _c_accessor_get_expr(expr.rhs, field_mapping) + ')'
     elif expr.op == 'enumref':
         enum_name = expr.lenfield_type.name
         constant_name = expr.lenfield_name
         c_name = _n(enum_name + (constant_name,)).upper()
         return c_name
-    elif expr.op == 'sumof':
+    elif expr.op == 'sumof' or expr.op == 'popcount':
         # locate the referenced list object
         list_obj = expr.lenfield_type
         field = None
@@ -1445,12 +1447,26 @@ def _c_accessor_get_expr(expr, field_mapping):
                 break
 
         if field is None:
-            raise Exception("list field '%s' referenced by sumof not found" % expr.lenfield_name)
-        list_name = field_mapping[field.c_field_name][0]
-        c_length_func = "%s(%s)" % (field.c_length_name, list_name)
-        # note: xcb_sumof() has only been defined for integers
-        c_length_func = _c_accessor_get_expr(field.type.expr, field_mapping)
-        return 'xcb_sumof(%s, %s)' % (list_name, c_length_func)
+            raise Exception("list field '%s' referenced by %s not found" % (expr.lenfield_name, expr.op))
+
+        bitcase = False
+        for p in expr.parent.parents:
+            if hasattr(p, 'is_bitcase') and p.is_bitcase:
+                bitcase = True
+
+        if bitcase:
+            list_name = field_mapping[field.c_field_name][0]
+            c_length_func = _c_accessor_get_expr(field.type.expr, field_mapping)
+        else:
+            if not prefix:
+                raise Exception("prefix necessary")
+            list_name = field.c_accessor_name + " (" + prefix[0][0] + ")"
+            c_length_func = _c_accessor_get_expr(field.type.expr, field_mapping)
+
+        if expr.op == 'sumof':
+            return 'xcb_sumof(%s, %s)' % (list_name, c_length_func)
+        else:
+            return 'xcb_popcount_len(%s, %s)' % (list_name, c_length_func)
     elif expr.op != None:
         return ('(' + _c_accessor_get_expr(expr.lhs, field_mapping) + 
                 ' ' + expr.op + ' ' + 
@@ -1641,7 +1657,7 @@ def _c_accessors_list(self, field):
     else:
         _h('%s (const %s *R  /**< */);', field.c_length_name, c_type)
         _c('%s (const %s *R  /**< */)', field.c_length_name, c_type)
-        length = _c_accessor_get_expr(field.type.expr, fields)
+        length = _c_accessor_get_expr(field.type.expr, fields, [('R')])
     _c('{')
     _c('    return %s;', length)
     _c('}')
@@ -1723,7 +1739,7 @@ def _c_accessors_list(self, field):
             _c('    i.data = (%s *) ((char *) prev.data + XCB_TYPE_PAD(%s, prev.index));', 
                field.c_field_type, type_pad_type(field.c_field_type))
         if switch_obj is None:
-            _c('    i.rem = %s;', _c_accessor_get_expr(field.type.expr, fields))
+            _c('    i.rem = %s;', _c_accessor_get_expr(field.type.expr, fields, [('R')]))
         _c('    i.index = (char *) i.data - (char *) %s;', 'R' if switch_obj is None else 'S' )
         _c('    return i;')
         _c('}')
@@ -2866,6 +2882,8 @@ def c_event(self, name):
         # Typedef
         _h('')
         _h('typedef %s %s;', _t(self.name + ('event',)), _t(name + ('event',)))
+
+    _c_accessors(self, name, name)
 
     _man_event(self, name)
 
