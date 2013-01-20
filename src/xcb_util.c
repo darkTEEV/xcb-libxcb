@@ -68,6 +68,17 @@ int xcb_popcount(uint32_t mask)
     return ((y + (y >> 3)) & 030707070707) % 077;
 }
 
+int xcb_popcount_len(uint32_t *masks, int len)
+{
+    int i, popcount = 0;
+
+    for (i = 0; i < len; i++) {
+        popcount += xcb_popcount(masks[i]);
+    }
+
+    return popcount;
+}
+
 int xcb_sumof(uint8_t *list, int len)
 {
   int i, s = 0;
